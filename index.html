@@ -261,7 +261,7 @@ summary{cursor:pointer;color:var(--slate);font-size:.85rem;font-weight:600}
       <button class="btn primary" id="pickDir">Chọn thư mục</button>
       <button class="btn" id="pickFiles">Chọn từng ảnh</button>
     </div>
-    <small>Gồm cả thư mục con · JPG, PNG, WebP · Trên điện thoại dùng "Chọn từng ảnh"</small>
+    <small>Gồm cả thư mục con · JPG, PNG, WebP, HEIC (iPhone) · Trên điện thoại dùng "Chọn từng ảnh"</small>
     <input type="file" id="dirInput" webkitdirectory directory multiple hidden>
     <input type="file" id="fileInput" accept="image/*" multiple hidden>
   </div>
@@ -306,8 +306,6 @@ summary{cursor:pointer;color:var(--slate);font-size:.85rem;font-weight:600}
       <div class="list" id="list"></div>
     </details>
   </section>
-
-  <p class="note">Ảnh không nén được (ví dụ HEIC của iPhone) vẫn được đưa vào ZIP ở dạng gốc, trong thư mục "khong-nen-duoc". Nếu ảnh nén ra lại nặng hơn ảnh gốc, app giữ nguyên ảnh gốc. Để iPhone chụp JPG: Cài đặt › Camera › Định dạng › "Tương thích nhất".</p>
 </div>
 </main>
 </div>
@@ -356,8 +354,31 @@ summary{cursor:pointer;color:var(--slate);font-size:.85rem;font-weight:600}
     if ("createImageBitmap" in window){ try { return await createImageBitmap(file, {imageOrientation:"from-image"}); } catch(e){} }
     return await new Promise((res, rej) => { const u = URL.createObjectURL(file); const img = new Image(); img.onload = () => { URL.revokeObjectURL(u); res(img); }; img.onerror = () => { URL.revokeObjectURL(u); rej(new Error("decode")); }; img.src = u; });
   }
+  // ---------- Đọc ảnh HEIC của iPhone ----------
+  const HEIC_LIB = "https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js";
+  let heicLoading = null;
+  const isHeic = f => /\.(heic|heif)$/i.test(f.name) || /image\/hei[cf]/i.test(f.type);
+  function loadHeicLib(){
+    if (window.heic2any) return Promise.resolve(window.heic2any);
+    if (!heicLoading) heicLoading = new Promise((res, rej) => {
+      const sc = document.createElement("script"); sc.src = HEIC_LIB; sc.async = true;
+      sc.onload = () => window.heic2any ? res(window.heic2any) : rej(new Error("heic"));
+      sc.onerror = () => { heicLoading = null; rej(new Error("heic")); };
+      document.head.appendChild(sc);
+    });
+    return heicLoading;
+  }
+  async function decodeAny(file){
+    if (!isHeic(file)) return loadImage(file);
+    try { return await loadImage(file); } catch(e){} // Safari đọc HEIC sẵn
+    if (!window.heic2any) setStatus("Đang tải bộ đọc ảnh HEIC…", false);
+    const lib = await loadHeicLib();
+    let out = await lib({ blob: file, toType: "image/jpeg", quality: 0.92 });
+    if (Array.isArray(out)) out = out[0];
+    return loadImage(out);
+  }
   async function compress(file, s){
-    const img = await loadImage(file);
+    const img = await decodeAny(file);
     const W = img.width, H = img.height, scale = Math.min(1, s.w / Math.max(W,H));
     const c = document.createElement("canvas");
     c.width = Math.max(1, Math.round(W*scale)); c.height = Math.max(1, Math.round(H*scale));
