@@ -133,8 +133,10 @@ summary{cursor:pointer;color:var(--slate);font-size:.85rem;font-weight:600}
 .msum{font-size:.86rem;color:var(--muted);margin:0}
 .msum b{color:var(--good)}
 .mhint{font-size:.78rem;color:var(--muted);margin:0;background:var(--surface);border:1px dashed var(--line);border-radius:10px;padding:8px 10px}
-.mbtns{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end}
-.mbtns .btn.primary{flex:1;min-width:160px}
+.mbtns{display:flex;flex-wrap:wrap;gap:10px;justify-content:center;align-items:center}
+.mbtns .btn{min-width:110px}
+.mbtns .btn.go{background:var(--teal);border-color:var(--teal);color:#fff;min-width:150px}
+.mbtns .btn.go:hover{background:var(--teal-dark);border-color:var(--teal-dark)}
 .mmsg{font-size:.82rem;font-weight:600;margin:0}
 @media (max-width:760px){.hero{grid-template-columns:1fr}.art{max-width:440px;margin:0 auto}.tags li{font-size:.72rem}}
 @media (max-width:520px){.presets{grid-template-columns:1fr}.grid{grid-template-columns:1fr}}
@@ -321,8 +323,7 @@ summary{cursor:pointer;color:var(--slate);font-size:.85rem;font-weight:600}
     <p class="mmsg" id="mMsg" hidden></p>
     <div class="mbtns">
       <button class="btn" id="mLater" type="button">Để sau</button>
-      <button class="btn" id="mPick" type="button" hidden>Chọn nơi lưu…</button>
-      <button class="btn primary" id="mSave" type="button">Tải về</button>
+      <button class="btn go" id="mSave" type="button">Lưu vào</button>
     </div>
   </div>
 </div>
@@ -442,27 +443,15 @@ summary{cursor:pointer;color:var(--slate);font-size:.85rem;font-weight:600}
     const ok = job.items.filter(i => i.status==="ok"), before = ok.reduce((a,i)=>a+i.file.size,0), after = ok.reduce((a,i)=>a+i.blob.size,0);
     $("mName").textContent = zipName(); $("mSize").textContent = fmtSize(job.zipBlob.size);
     $("mSum").innerHTML = `Đã nén <b>${ok.length}/${job.items.length}</b> ảnh · ${fmtSize(before)} → ${fmtSize(after)} <b>(−${before?Math.round((1-after/before)*100):0}%)</b>`;
-    $("mPick").hidden = !canPick;
-    $("mSave").textContent = canPick ? "Tải vào thư mục Tải xuống" : "Tải về";
-    $("mHint").hidden = true;
-    $("mMsg").hidden = true;
-    $("modal").hidden = false; $("mSave").focus();
+    $("mHint").hidden = true; $("mMsg").hidden = true;
+    const btn = $("mSave"); btn.disabled = false; btn.textContent = "Lưu vào";
+    $("modal").hidden = false; btn.focus();
   }
   function closeSaveDialog(){ $("modal").hidden = true; }
   function showMsg(t, bad){ const m = $("mMsg"); m.hidden = false; m.textContent = t; m.className = "mmsg " + (bad ? "bad" : "good"); }
 
-  async function saveViaPicker(){
-    try {
-      const handle = await window.showSaveFilePicker({ suggestedName: zipName(), types: [{ description: "File ZIP", accept: { "application/zip": [".zip"] } }] });
-      const w = await handle.createWritable(); await w.write(job.zipBlob); await w.close();
-      showMsg("Đã lưu: " + handle.name, false); setTimeout(closeSaveDialog, 1600);
-    } catch(e){
-      if (e && e.name === "AbortError") return; // bro bấm hủy
-      showMsg("Không lưu được vào chỗ đã chọn, thử nút tải bình thường nhé.", true);
-    }
-  }
-  async function downloadZip(){
-    if (!job || !job.zipBlob) return;
+  // Tải bình thường vào thư mục Tải xuống (điện thoại, trình duyệt không hỗ trợ chọn nơi lưu)
+  async function downloadNormal(){
     const name = zipName();
     if (dl){
       try { await dl.save({filename:name, data:job.zipBlob}); closeSaveDialog(); return; }
@@ -472,8 +461,27 @@ summary{cursor:pointer;color:var(--slate);font-size:.85rem;font-weight:600}
     document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(a.href), 10000);
     closeSaveDialog();
   }
-  $("mSave").onclick = downloadZip;
-  $("mPick").onclick = saveViaPicker;
+  // "Lưu vào": hỏi chỗ lưu, chọn xong là lưu luôn
+  async function saveZip(){
+    if (!job || !job.zipBlob) return;
+    if (!canPick) return downloadNormal();
+    let handle;
+    try {
+      handle = await window.showSaveFilePicker({ suggestedName: zipName(), types: [{ description: "File ZIP", accept: { "application/zip": [".zip"] } }] });
+    } catch(e){
+      if (e && e.name === "AbortError") return; // bro bấm hủy, không lưu gì
+      return downloadNormal();
+    }
+    const btn = $("mSave"); btn.disabled = true; btn.textContent = "Đang lưu…";
+    try {
+      const w = await handle.createWritable(); await w.write(job.zipBlob); await w.close();
+      showMsg("Đã lưu xong: " + handle.name, false); setTimeout(closeSaveDialog, 1500);
+    } catch(e){
+      showMsg("Không lưu được vào chỗ đã chọn, bro bấm \"Lưu vào\" và chọn chỗ khác nhé.", true);
+    }
+    btn.disabled = false; btn.textContent = "Lưu vào";
+  }
+  $("mSave").onclick = saveZip;
   $("mLater").onclick = closeSaveDialog;
   $("modal").addEventListener("click", e => { if (e.target.id === "modal") closeSaveDialog(); });
   document.addEventListener("keydown", e => { if (e.key === "Escape" && !$("modal").hidden) closeSaveDialog(); });
