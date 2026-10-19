@@ -280,7 +280,7 @@ summary{cursor:pointer;color:var(--slate);font-size:.85rem;font-weight:600}
           <div><span>Ảnh trong thư mục</span><span id="cntImg">0</span></div>
           <div><span class="good">Nén thành công</span><span class="good" id="cntOk">0</span></div>
           <div><span class="bad">Không nén được</span><span class="bad" id="cntFail">0</span></div>
-          <div><span>File khác (bỏ qua)</span><span id="cntSkip">0</span></div>
+          <div><span>File khác (giữ nguyên)</span><span id="cntSkip">0</span></div>
         </div>
       </div>
       <div class="cell">
@@ -395,13 +395,14 @@ summary{cursor:pointer;color:var(--slate);font-size:.85rem;font-weight:600}
   const outPath = (path, s) => path.replace(/\.[^./]+$/, "") + (s.fmt === "webp" ? ".webp" : ".jpg");
 
   // ---------- Đọc thư mục khi kéo thả ----------
-  function readEntry(entry, prefix, out){
+  function readEntry(entry, prefix, out, dirs){
     return new Promise(resolve => {
       if (entry.isFile){ entry.file(f => { out.push({file:f, path: prefix + f.name}); resolve(); }, () => resolve()); }
       else if (entry.isDirectory){
+        if (dirs) dirs.push(prefix + entry.name + "/"); // ghi nhận cả thư mục trống
         const reader = entry.createReader(); const all = [];
         const readBatch = () => reader.readEntries(async batch => {
-          if (!batch.length){ for (const e of all) await readEntry(e, prefix + entry.name + "/", out); resolve(); }
+          if (!batch.length){ for (const e of all) await readEntry(e, prefix + entry.name + "/", out, dirs); resolve(); }
           else { all.push(...batch); readBatch(); }
         }, () => resolve());
         readBatch();
@@ -410,14 +411,14 @@ summary{cursor:pointer;color:var(--slate);font-size:.85rem;font-weight:600}
   }
 
   // ---------- Bắt đầu 1 lượt ----------
-  function start(entries, folderName){
+  function start(entries, folderName, dirs, wrap){
     const items = [], skipped = [];
     entries.forEach(e => {
-      if (e.file.name.startsWith(".")) return; // bỏ file ẩn hệ thống
+      if (/^(\.ds_store|thumbs\.db|desktop\.ini)$/i.test(e.file.name)) return; // chỉ bỏ file rác hệ thống
       (e.file.type.startsWith("image/") || IMG_EXT.test(e.file.name) ? items : skipped).push(e);
     });
     items.forEach(it => { it.status = "waiting"; });
-    job = { name: folderName || "anh", items, skipped, zipBlob: null };
+    job = { name: folderName || "anh", items, skipped, dirs: (dirs || []).filter(Boolean), wrap: !!wrap, zipBlob: null };
     $("folderName").textContent = "Thư mục: " + job.name;
     $("detailBox").open = false;
     run();
@@ -441,10 +442,20 @@ summary{cursor:pointer;color:var(--slate);font-size:.85rem;font-weight:600}
     if (!job.items.length){ render(); return; }
     setStatus("Đang đóng gói ZIP…", false);
     const zip = new JSZip(); const used = {};
+    // Giữ nguyên thư mục gốc + toàn bộ thư mục con (kể cả thư mục trống)
+    const base = job.wrap ? job.name.replace(/[\\/:*?"<>|]/g, "-") + "/" : "";
+    if (base) zip.folder(base.slice(0, -1));
+    for (const d of job.dirs) zip.folder(base + d.replace(/\/$/, ""));
     for (const it of job.items){
-      let p = it.status === "ok" ? (it.kept ? it.path : outPath(it.path, s)) : "khong-nen-duoc/" + it.path;
+      let p = base + (it.status === "ok" && !it.kept ? outPath(it.path, s) : it.path); // ảnh lỗi: giữ file gốc đúng chỗ
       while (used[p]) p = p.replace(/(\.\w+)?$/, m => "_1" + m); used[p] = 1;
       zip.file(p, it.status === "ok" ? it.blob : it.file);
+    }
+    // File không phải ảnh (PDF, Excel, video…): giữ nguyên, đúng vị trí trong thư mục
+    for (const e of job.skipped){
+      let p = base + e.path;
+      while (used[p]) p = p.replace(/(\.\w+)?$/, m => "_1" + m); used[p] = 1;
+      zip.file(p, e.file);
     }
     const blob = await zip.generateAsync({type:"blob", compression:"STORE"});
     if (my !== runId) return;
@@ -559,7 +570,7 @@ summary{cursor:pointer;color:var(--slate);font-size:.85rem;font-weight:600}
     job.skipped.forEach(e => {
       const row = document.createElement("div"); row.className = "item";
       const nm = document.createElement("span"); nm.className = "name"; nm.textContent = e.path; nm.style.color = "var(--muted)";
-      const sz = document.createElement("span"); sz.className = "sz"; sz.textContent = "bỏ qua (không phải ảnh)";
+      const sz = document.createElement("span"); sz.className = "sz"; sz.textContent = "giữ nguyên trong ZIP";
       row.append(nm, sz); frag.appendChild(row);
     });
     list.appendChild(frag);
@@ -567,14 +578,33 @@ summary{cursor:pointer;color:var(--slate);font-size:.85rem;font-weight:600}
   $("detailBox").addEventListener("toggle", () => { if ($("detailBox").open) renderList(); });
 
   // ---------- Nút & kéo thả ----------
-  $("pickDir").onclick = () => $("dirInput").click();
-  $("heroPick").onclick = () => { $("drop").scrollIntoView({behavior:"smooth", block:"center"}); $("dirInput").click(); };
+  // Chọn thư mục: Chrome/Edge máy tính dùng cách đọc đầy đủ (giữ được thư mục trống), máy khác dùng cách thường
+  async function walkDir(handle, prefix, files, dirs){
+    for await (const [name, h] of handle.entries()){
+      if (h.kind === "file"){ try { files.push({ file: await h.getFile(), path: prefix + name }); } catch(e){} }
+      else { dirs.push(prefix + name + "/"); await walkDir(h, prefix + name + "/", files, dirs); }
+    }
+  }
+  async function pickFolder(){
+    let topFrame = false; try { topFrame = window.self === window.top; } catch(e){}
+    if (window.showDirectoryPicker && topFrame){
+      let root;
+      try { root = await window.showDirectoryPicker({ mode: "read" }); }
+      catch(e){ if (e && e.name === "AbortError") return; $("dirInput").click(); return; }
+      setStatus("Đang đọc thư mục…", false);
+      const files = [], dirs = [];
+      await walkDir(root, "", files, dirs);
+      start(files, root.name, dirs, true);
+    } else $("dirInput").click();
+  }
+  $("pickDir").onclick = pickFolder;
+  $("heroPick").onclick = () => { $("drop").scrollIntoView({behavior:"smooth", block:"center"}); pickFolder(); };
   $("pickFiles").onclick = () => $("fileInput").click();
   $("dirInput").onchange = e => {
     const files = [...e.target.files]; e.target.value = "";
     if (!files.length) return;
     const root = (files[0].webkitRelativePath || "").split("/")[0] || "anh";
-    start(files.map(f => ({file:f, path: (f.webkitRelativePath || f.name).split("/").slice(1).join("/") || f.name})), root);
+    start(files.map(f => ({file:f, path: (f.webkitRelativePath || f.name).split("/").slice(1).join("/") || f.name})), root, [], true);
   };
   $("fileInput").onchange = e => {
     const files = [...e.target.files]; e.target.value = "";
@@ -587,16 +617,16 @@ summary{cursor:pointer;color:var(--slate);font-size:.85rem;font-weight:600}
     const dtItems = [...(e.dataTransfer.items || [])];
     const entries = dtItems.map(i => i.webkitGetAsEntry && i.webkitGetAsEntry()).filter(Boolean);
     if (entries.length){
-      const out = [];
+      const out = [], dirPaths = [];
       const dirs = entries.filter(x => x.isDirectory);
-      for (const en of entries){
-        if (en.isDirectory && entries.length === 1) await readEntry(en, "", out).then(()=>{}); // đọc bên trong, giữ đường dẫn con
-        else await readEntry(en, "", out);
-      }
+      for (const en of entries) await readEntry(en, "", out, dirPaths);
       // Nếu thả đúng 1 thư mục: bỏ tên thư mục gốc khỏi đường dẫn
-      let name = "anh";
-      if (entries.length === 1 && dirs.length === 1){ name = dirs[0].name; out.forEach(o => { o.path = o.path.replace(name + "/", ""); }); }
-      start(out, name);
+      let name = "anh", folderList = dirPaths;
+      if (entries.length === 1 && dirs.length === 1){
+        name = dirs[0].name; const cut = p => p.startsWith(name + "/") ? p.slice(name.length + 1) : p;
+        out.forEach(o => { o.path = cut(o.path); }); folderList = dirPaths.map(cut);
+      }
+      start(out, name, folderList, entries.length === 1 && dirs.length === 1);
     } else if (e.dataTransfer.files.length){
       start([...e.dataTransfer.files].map(f => ({file:f, path:f.name})), "anh");
     }
